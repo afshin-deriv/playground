@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package playground;
+
+option go_package = "github.com/afshin-deriv/playground/pb;pb";
+
+service PlaygroundService {
+  rpc ExecuteCode(stream ExecuteRequest) returns (stream ExecuteResponse) {}
+}
+
+message ExecuteRequest {
+  string language = 1;
+  string code = 2;
+  string input = 3;
+}
+
+message ExecuteResponse {
+  string output = 1;
+  bool is_error = 2;
+}
