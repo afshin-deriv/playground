@@ -2,8 +2,11 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/afshin-deriv/playground/pb"
 	"github.com/afshin-deriv/playground/pkg/executor"
@@ -16,9 +19,8 @@ type server struct {
 }
 
 func (s *server) ExecuteCode(stream pb.PlaygroundService_ExecuteCodeServer) error {
-	log.Println("ExecuteCode called")
-	input := make(chan string)
-	output := make(chan string)
+	input := make(chan string, 10)
+	output := make(chan string, 10)
 	done := make(chan struct{})
 
 	go func() {
@@ -26,27 +28,25 @@ func (s *server) ExecuteCode(stream pb.PlaygroundService_ExecuteCodeServer) erro
 		for {
 			in, err := stream.Recv()
 			if err != nil {
-				log.Printf("Error receiving from stream: %v", err)
+				slog.Error("receiving from stream: %v", "error", err)
 				return
 			}
 			if in.Code != "" {
-				// New code execution request
-				log.Printf("Received code execution request. Language: %s", in.Language)
+				slog.Error("received code execution request. Language: %s", "error", in.Language)
 				execReq := executor.ExecRequest{
 					Language: in.Language,
 					Code:     in.Code,
 				}
 				go func() {
 					if err := executor.ExecuteInteractiveCode(stream.Context(), execReq, input, output); err != nil {
-						log.Printf("Error executing code: %v", err)
+						slog.Error("executing code: %v", "error", err)
 						output <- fmt.Sprintf("Error: %v\n", err)
 					}
-					log.Println("Code execution completed")
+					slog.Debug("code execution completed")
 					close(output)
 				}()
 			} else {
-				// Regular input
-				log.Printf("Received input: %s", in.Input)
+				slog.Debug("received input: %s", "info", in.Input)
 				input <- in.Input
 			}
 		}
@@ -56,18 +56,17 @@ func (s *server) ExecuteCode(stream pb.PlaygroundService_ExecuteCodeServer) erro
 		select {
 		case out, ok := <-output:
 			if !ok {
-				// output channel was closed, which means execution has finished
 				return nil
 			}
 			if err := stream.Send(&pb.ExecuteResponse{Output: out}); err != nil {
-				log.Printf("Error sending to stream: %v", err)
+				slog.Error("sending to stream: %v", "error", err)
 				return err
 			}
 		case <-done:
-			log.Println("Stream closed by client")
+			slog.Debug("stream closed by client")
 			return nil
 		case <-stream.Context().Done():
-			log.Println("Context canceled")
+			slog.Debug("context canceled")
 			return stream.Context().Err()
 		}
 	}
@@ -76,16 +75,27 @@ func (s *server) ExecuteCode(stream pb.PlaygroundService_ExecuteCodeServer) erro
 func main() {
 	lis, err := net.Listen("tcp", ":50052")
 	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
+		slog.Error("failed to listen: %v", "error", err)
 	}
+
 	s := grpc.NewServer()
 	pb.RegisterPlaygroundServiceServer(s, &server{})
 
-	// Enable reflection
+	// Enable reflection for gRPC CLI debugging
 	reflection.Register(s)
 
-	log.Println("gRPC server listening on :50052")
+	// Set up graceful shutdown
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigs
+		slog.Info("shutting down gRPC server...")
+		s.GracefulStop()
+	}()
+
+	slog.Info("gRPC server listening on :50052")
 	if err := s.Serve(lis); err != nil {
-		log.Fatalf("failed to serve: %v", err)
+		slog.Error("Failed to serve: %v", "error", err)
 	}
 }
