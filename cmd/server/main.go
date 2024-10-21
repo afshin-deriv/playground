@@ -1,12 +1,14 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net"
 
 	"github.com/afshin-deriv/playground/pb"
 	"github.com/afshin-deriv/playground/pkg/executor"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 )
 
 type server struct {
@@ -17,49 +19,58 @@ func (s *server) ExecuteCode(stream pb.PlaygroundService_ExecuteCodeServer) erro
 	log.Println("ExecuteCode called")
 	input := make(chan string)
 	output := make(chan string)
+	done := make(chan struct{})
 
 	go func() {
+		defer close(done)
 		for {
 			in, err := stream.Recv()
 			if err != nil {
 				log.Printf("Error receiving from stream: %v", err)
-				close(input)
 				return
 			}
-			log.Printf("Received input: %s", in.Input)
-			input <- in.Input
+			if in.Code != "" {
+				// New code execution request
+				log.Printf("Received code execution request. Language: %s", in.Language)
+				execReq := executor.ExecRequest{
+					Language: in.Language,
+					Code:     in.Code,
+				}
+				go func() {
+					if err := executor.ExecuteInteractiveCode(stream.Context(), execReq, input, output); err != nil {
+						log.Printf("Error executing code: %v", err)
+						output <- fmt.Sprintf("Error: %v\n", err)
+					}
+					log.Println("Code execution completed")
+					close(output)
+				}()
+			} else {
+				// Regular input
+				log.Printf("Received input: %s", in.Input)
+				input <- in.Input
+			}
 		}
 	}()
 
-	go func() {
-		for out := range output {
+	for {
+		select {
+		case out, ok := <-output:
+			if !ok {
+				// output channel was closed, which means execution has finished
+				return nil
+			}
 			if err := stream.Send(&pb.ExecuteResponse{Output: out}); err != nil {
 				log.Printf("Error sending to stream: %v", err)
-				return
+				return err
 			}
+		case <-done:
+			log.Println("Stream closed by client")
+			return nil
+		case <-stream.Context().Done():
+			log.Println("Context canceled")
+			return stream.Context().Err()
 		}
-	}()
-
-	req, err := stream.Recv()
-	if err != nil {
-		log.Printf("Error receiving initial request: %v", err)
-		return err
 	}
-
-	log.Printf("Received code execution request. Language: %s", req.Language)
-
-	execReq := executor.ExecRequest{
-		Language: req.Language,
-		Code:     req.Code,
-	}
-
-	if err := executor.ExecuteInteractiveCode(stream.Context(), execReq, input, output); err != nil {
-		log.Printf("Error executing code: %v", err)
-		return err
-	}
-
-	log.Println("Code execution completed")
-	return nil
 }
 
 func main() {
@@ -69,6 +80,10 @@ func main() {
 	}
 	s := grpc.NewServer()
 	pb.RegisterPlaygroundServiceServer(s, &server{})
+
+	// Enable reflection
+	reflection.Register(s)
+
 	log.Println("gRPC server listening on :50052")
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("failed to serve: %v", err)
